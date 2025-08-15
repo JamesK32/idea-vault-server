@@ -4,32 +4,33 @@ const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
-// Twilio sends x-www-form-urlencoded, not JSON
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json()); // <-- add this: lets us read JSON bodies
+app.use(express.urlencoded({ extended: false })); // for Twilio-style bodies
+app.use(express.json());                            // for JSON bodies
 
+// Supabase client
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE
 );
-function checkKey(req) {
-    const k = req.headers['x-api-key'] || req.query.key; // header or ?key=...
-    return k && process.env.API_KEY && k === process.env.API_KEY;
-  }
 
-// health check
+// Simple API key check (header: x-api-key or ?key=)
+function checkKey(req) {
+  const k = req.headers['x-api-key'] || req.query.key;
+  return k && process.env.API_KEY && k === process.env.API_KEY;
+}
+
+// Health
 app.get('/', (_, res) => res.send('ok'));
 
-// super tiny “type guesser”
+// ---------- Optional: SMS webhook you set up earlier ----------
 function guessType(text = '', hasMedia = false) {
   if (/^\s*idea[:\-]/i.test(text)) return 'idea';
   if (/^\s*(contact|person)[:\-]/i.test(text)) return 'person';
   if (/^\s*tool[:\-]/i.test(text)) return 'tool';
-  if (hasMedia) return 'tool'; // screenshots → treat as tool for now
+  if (hasMedia) return 'tool';
   return 'unknown';
 }
 
-// Twilio webhook (we'll point Twilio here later)
 app.post('/twilio/webhook', async (req, res) => {
   try {
     const from = req.body.From || '';
@@ -82,7 +83,6 @@ app.post('/twilio/webhook', async (req, res) => {
       });
     }
 
-    // Twilio expects XML, empty is fine
     res.set('Content-Type', 'text/xml');
     res.send('<Response></Response>');
   } catch (err) {
@@ -90,137 +90,236 @@ app.post('/twilio/webhook', async (req, res) => {
     res.status(500).send('<Response></Response>');
   }
 });
-// --- Quick Add API (POST /api/quick-add) ---
+// --------------------------------------------------------------
+
+// Quick Add API (idea / person / tool)
 app.post('/api/quick-add', async (req, res) => {
-    try {
-      if (!checkKey(req)) return res.status(401).json({ error: 'bad key' });
-  
-      const { type, payload } = req.body || {};
-      if (!type) return res.status(400).json({ error: 'missing type' });
-  
-      if (type === 'idea') {
-        const { title, summary } = payload || {};
-        if (!title) return res.status(400).json({ error: 'title required' });
-        await supabase.from('idea').insert({ title, summary: summary || null });
-        return res.json({ ok: true, type });
-      }
-  
-      if (type === 'person') {
-        const { name, phone, email, company, role, school, location } = payload || {};
-        if (!name) return res.status(400).json({ error: 'name required' });
-        await supabase.from('person').insert({ name, phone, email, company, role, school, location });
-        return res.json({ ok: true, type });
-      }
-  
-      if (type === 'tool') {
-        const { name, url, category, description } = payload || {};
-        if (!name) return res.status(400).json({ error: 'name required' });
-        await supabase.from('tool').insert({ name, url, category, description });
-        return res.json({ ok: true, type });
-      }
-  
-      return res.status(400).json({ error: 'unknown type' });
-    } catch (e) {
-      console.error(e);
-      return res.status(500).json({ error: 'server error' });
+  try {
+    if (!checkKey(req)) return res.status(401).json({ error: 'bad key' });
+
+    const { type, payload } = req.body || {};
+    if (!type) return res.status(400).json({ error: 'missing type' });
+
+    if (type === 'idea') {
+      const { title, summary } = payload || {};
+      if (!title) return res.status(400).json({ error: 'title required' });
+      await supabase.from('idea').insert({ title, summary: summary || null });
+      return res.json({ ok: true, type });
     }
-  });
-  // --- Quick Add Web Form (GET /add) ---
-app.get('/add', (_req, res) => {
-    res.set('Content-Type', 'text/html');
-    res.send(`<!doctype html>
-  <html>
-  <head>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Idea Vault — Quick Add</title>
-  <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:720px;margin:24px auto;padding:0 12px}
-    h1{font-size:22px}
-    fieldset{border:1px solid #ddd;border-radius:12px;padding:12px;margin:12px 0}
-    input,textarea{width:100%;padding:10px;margin:6px 0;border:1px solid #ccc;border-radius:10px;font-size:16px}
-    button{padding:10px 14px;border:0;border-radius:10px;background:#111;color:#fff;font-weight:600}
-    .row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-    .ok{color:green;margin:8px 0}.err{color:#b00;margin:8px 0}
-  </style>
-  </head>
-  <body>
-  <h1>Quick Add</h1>
-  <p>Paste your <b>API Key</b> once and it saves in this browser.</p>
-  <input id="key" placeholder="API Key" />
-  <button onclick="saveKey()">Save Key</button>
-  <div id="msg"></div>
-  
-  <fieldset>
-    <legend><b>Idea</b></legend>
-    <input id="i_title" placeholder="Title*" />
-    <textarea id="i_summary" placeholder="Summary"></textarea>
-    <button onclick="sendIdea()">Add Idea</button>
-  </fieldset>
-  
-  <fieldset>
-    <legend><b>Person</b></legend>
-    <input id="p_name" placeholder="Full name*" />
-    <div class="row">
-      <input id="p_phone" placeholder="Phone" />
-      <input id="p_email" placeholder="Email" />
-    </div>
-    <div class="row">
-      <input id="p_company" placeholder="Company" />
-      <input id="p_role" placeholder="Role/Title" />
-    </div>
-    <div class="row">
-      <input id="p_school" placeholder="School" />
-      <input id="p_location" placeholder="Location" />
-    </div>
-    <button onclick="sendPerson()">Add Person</button>
-  </fieldset>
-  
-  <fieldset>
-    <legend><b>Tool</b></legend>
-    <input id="t_name" placeholder="Name*" />
-    <input id="t_url" placeholder="URL (https://...)" />
-    <input id="t_category" placeholder="Category (AI/Design/etc.)" />
-    <textarea id="t_desc" placeholder="Description"></textarea>
-    <button onclick="sendTool()">Add Tool</button>
-  </fieldset>
-  
-  <script>
-  const API = '/api/quick-add';
-  const msg = (t, ok=true)=>{ const el=document.getElementById('msg'); el.className=ok?'ok':'err'; el.textContent=t; }
-  const keyBox = document.getElementById('key');
-  keyBox.value = localStorage.getItem('iv_key') || '';
-  function saveKey(){ localStorage.setItem('iv_key', keyBox.value.trim()); msg('Key saved ✓', true); }
-  
-  async function post(type, payload){
-    const k = (localStorage.getItem('iv_key')||'').trim();
-    if(!k) return msg('Add API key first.', false);
-    const r = await fetch(API, {
-      method:'POST',
-      headers:{'Content-Type':'application/json','x-api-key':k},
-      body: JSON.stringify({type, payload})
-    });
-    const data = await r.json().catch(()=>({}));
-    if(r.ok) msg('Saved ✓', true); else msg(data.error || 'Error', false);
+
+    if (type === 'person') {
+      const { name, phone, email, company, role, school, location } = payload || {};
+      if (!name) return res.status(400).json({ error: 'name required' });
+      await supabase.from('person').insert({ name, phone, email, company, role, school, location });
+      return res.json({ ok: true, type });
+    }
+
+    if (type === 'tool') {
+      const { name, url, category, description } = payload || {};
+      if (!name) return res.status(400).json({ error: 'name required' });
+      await supabase.from('tool').insert({ name, url, category, description });
+      return res.json({ ok: true, type });
+    }
+
+    return res.status(400).json({ error: 'unknown type' });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'server error' });
   }
-  
-  function sendIdea(){ post('idea', { title:document.getElementById('i_title').value, summary:document.getElementById('i_summary').value }); }
-  function sendPerson(){ post('person', {
-    name:document.getElementById('p_name').value,
-    phone:document.getElementById('p_phone').value,
-    email:document.getElementById('p_email').value,
-    company:document.getElementById('p_company').value,
-    role:document.getElementById('p_role').value,
-    school:document.getElementById('p_school').value,
-    location:document.getElementById('p_location').value
-  }); }
-  function sendTool(){ post('tool', {
-    name:document.getElementById('t_name').value,
-    url:document.getElementById('t_url').value,
-    category:document.getElementById('t_category').value,
-    description:document.getElementById('t_desc').value
-  }); }
-  </script>
-  </body></html>`);
+});
+
+// Research Add API (note / ref / fact) for an Idea
+// body: { rtype: 'note'|'ref'|'fact', idea_title: '...',
+//         note?, source_url?, source_title?, fact?, confidence? }
+app.post('/api/research-add', async (req, res) => {
+  try {
+    if (!checkKey(req)) return res.status(401).json({ error: 'bad key' });
+
+    const { rtype, idea_title, note, source_url, source_title, fact, confidence } = req.body || {};
+    if (!rtype || !idea_title) return res.status(400).json({ error: 'missing rtype or idea_title' });
+
+    // find existing idea by title or create it
+    async function getIdeaId(title) {
+      const found = await supabase
+        .from('idea')
+        .select('id')
+        .eq('title', title)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (found.error) throw found.error;
+      if (found.data && found.data[0]) return found.data[0].id;
+
+      const ins = await supabase.from('idea').insert({ title }).select('id').single();
+      if (ins.error) throw ins.error;
+      return ins.data.id;
+    }
+
+    const ideaId = await getIdeaId(String(idea_title).trim());
+
+    if (rtype === 'note') {
+      if (!note) return res.status(400).json({ error: 'note required' });
+      const r = await supabase.from('idea_note').insert({ idea_id: ideaId, content: String(note) });
+      if (r.error) throw r.error;
+      return res.json({ ok: true, rtype });
+    }
+
+    if (rtype === 'ref') {
+      if (!source_url && !source_title)
+        return res.status(400).json({ error: 'source_url or source_title required' });
+      const r = await supabase.from('idea_source').insert({
+        idea_id: ideaId,
+        kind: source_url ? 'url' : 'other',
+        url: source_url || null,
+        title: source_title || null
+      });
+      if (r.error) throw r.error;
+      return res.json({ ok: true, rtype });
+    }
+
+    if (rtype === 'fact') {
+      if (!fact) return res.status(400).json({ error: 'fact (statement) required' });
+      const r = await supabase.from('idea_fact').insert({
+        idea_id: ideaId,
+        statement: String(fact),
+        source_url: source_url || null,
+        confidence: Number(confidence) || null
+      });
+      if (r.error) throw r.error;
+      return res.json({ ok: true, rtype });
+    }
+
+    return res.status(400).json({ error: 'unknown rtype' });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: 'server error' });
+  }
+});
+
+// Quick Add Web Form (with Research section)
+app.get('/add', (_req, res) => {
+  res.set('Content-Type', 'text/html');
+  res.send(`<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Idea Vault — Quick Add</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:720px;margin:24px auto;padding:0 12px}
+  h1{font-size:22px}
+  fieldset{border:1px solid #ddd;border-radius:12px;padding:12px;margin:12px 0}
+  input,textarea{width:100%;padding:10px;margin:6px 0;border:1px solid #ccc;border-radius:10px;font-size:16px}
+  button{padding:10px 14px;border:0;border-radius:10px;background:#111;color:#fff;font-weight:600}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .ok{color:green;margin:8px 0}.err{color:#b00;margin:8px 0}
+</style>
+</head>
+<body>
+<h1>Quick Add</h1>
+<p>Paste your <b>API Key</b> once and it saves in this browser.</p>
+<input id="key" placeholder="API Key" />
+<button onclick="saveKey()">Save Key</button>
+<div id="msg"></div>
+
+<fieldset>
+  <legend><b>Idea</b></legend>
+  <input id="i_title" placeholder="Title*" />
+  <textarea id="i_summary" placeholder="Summary"></textarea>
+  <button onclick="sendIdea()">Add Idea</button>
+</fieldset>
+
+<fieldset>
+  <legend><b>Person</b></legend>
+  <input id="p_name" placeholder="Full name*" />
+  <div class="row">
+    <input id="p_phone" placeholder="Phone" />
+    <input id="p_email" placeholder="Email" />
+  </div>
+  <div class="row">
+    <input id="p_company" placeholder="Company" />
+    <input id="p_role" placeholder="Role/Title" />
+  </div>
+  <div class="row">
+    <input id="p_school" placeholder="School" />
+    <input id="p_location" placeholder="Location" />
+  </div>
+  <button onclick="sendPerson()">Add Person</button>
+</fieldset>
+
+<fieldset>
+  <legend><b>Tool</b></legend>
+  <input id="t_name" placeholder="Name*" />
+  <input id="t_url" placeholder="URL (https://...)" />
+  <input id="t_category" placeholder="Category (AI/Design/etc.)" />
+  <textarea id="t_desc" placeholder="Description"></textarea>
+  <button onclick="sendTool()">Add Tool</button>
+</fieldset>
+
+<fieldset>
+  <legend><b>Research (for an Idea)</b></legend>
+  <input id="r_title" placeholder="Idea title* (exact or new)" />
+  <div class="row">
+    <input id="r_type" placeholder="Type: note | ref | fact" />
+    <input id="r_conf" placeholder="Confidence (1–5, for facts)" />
+  </div>
+  <textarea id="r_note" placeholder="Note text (for type=note)"></textarea>
+  <input id="r_src_title" placeholder="Source title (for type=ref)" />
+  <input id="r_src_url" placeholder="Source URL (for type=ref/fact)" />
+  <textarea id="r_fact" placeholder="Fact statement (for type=fact)"></textarea>
+  <button onclick="sendResearch()">Add Research</button>
+</fieldset>
+
+<script>
+const API = '/api/quick-add';
+const msg = (t, ok=true)=>{ const el=document.getElementById('msg'); el.className=ok?'ok':'err'; el.textContent=t; }
+const keyBox = document.getElementById('key');
+keyBox.value = localStorage.getItem('iv_key') || '';
+function saveKey(){ localStorage.setItem('iv_key', keyBox.value.trim()); msg('Key saved ✓', true); }
+
+async function post(url, body){
+  const k = (localStorage.getItem('iv_key')||'').trim();
+  if(!k) return msg('Add API key first.', false);
+  const r = await fetch(url, {
+    method:'POST',
+    headers:{'Content-Type':'application/json','x-api-key':k},
+    body: JSON.stringify(body)
   });
+  const data = await r.json().catch(()=>({}));
+  if(r.ok) msg('Saved ✓', true); else msg(data.error || 'Error', false);
+}
+
+function sendIdea(){ post(API, { type:'idea', payload:{ title:document.getElementById('i_title').value, summary:document.getElementById('i_summary').value } }); }
+function sendPerson(){ post(API, { type:'person', payload:{
+  name:document.getElementById('p_name').value,
+  phone:document.getElementById('p_phone').value,
+  email:document.getElementById('p_email').value,
+  company:document.getElementById('p_company').value,
+  role:document.getElementById('p_role').value,
+  school:document.getElementById('p_school').value,
+  location:document.getElementById('p_location').value
+}}); }
+function sendTool(){ post(API, { type:'tool', payload:{
+  name:document.getElementById('t_name').value,
+  url:document.getElementById('t_url').value,
+  category:document.getElementById('t_category').value,
+  description:document.getElementById('t_desc').value
+}}); }
+
+function sendResearch(){ 
+  post('/api/research-add', {
+    rtype: (document.getElementById('r_type').value||'').trim().toLowerCase(),
+    idea_title: document.getElementById('r_title').value,
+    note: document.getElementById('r_note').value,
+    source_title: document.getElementById('r_src_title').value,
+    source_url: document.getElementById('r_src_url').value,
+    fact: document.getElementById('r_fact').value,
+    confidence: document.getElementById('r_conf').value
+  });
+}
+</script>
+</body></html>`);
+});
+
+// Start server (Railway-compatible)
 const port = Number(process.env.PORT) || 8080;
 app.listen(port, '0.0.0.0', () => console.log('listening on', port));
