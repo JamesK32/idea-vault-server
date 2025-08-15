@@ -505,7 +505,8 @@ app.get('/app', (_req, res) => {
   </script>
   </body></html>`);
   });
-
+// send home to the app
+app.get('/', (_req, res) => res.redirect('/app'));
 // Start server (Railway-compatible)
 const port = Number(process.env.PORT) || 8080;
 app.listen(port, '0.0.0.0', () => console.log('listening on', port));
