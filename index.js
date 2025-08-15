@@ -320,6 +320,192 @@ function sendResearch(){
 </body></html>`);
 });
 
+// --- List API (GET /api/list?type=idea|person|tool) ---
+app.get('/api/list', async (req, res) => {
+    try {
+      if (!checkKey(req)) return res.status(401).json({ error: 'bad key' });
+      const type = (req.query.type || '').toString();
+      if (!['idea','person','tool'].includes(type)) {
+        return res.status(400).json({ error: 'bad type' });
+      }
+      const r = await supabase.from(type).select('*').order('created_at', { ascending: false }).limit(200);
+      if (r.error) throw r.error;
+      res.json(r.data || []);
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: 'server error' });
+    }
+  });
+  
+  // --- Idea Research API (GET /api/idea/:id/research) ---
+  app.get('/api/idea/:id/research', async (req, res) => {
+    try {
+      if (!checkKey(req)) return res.status(401).json({ error: 'bad key' });
+      const id = req.params.id;
+      const [notes, refs, facts] = await Promise.all([
+        supabase.from('idea_note').select('*').eq('idea_id', id).order('created_at', { ascending: false }),
+        supabase.from('idea_source').select('*').eq('idea_id', id).order('created_at', { ascending: false }),
+        supabase.from('idea_fact').select('*').eq('idea_id', id).order('created_at', { ascending: false })
+      ]);
+      if (notes.error) throw notes.error;
+      if (refs.error) throw refs.error;
+      if (facts.error) throw facts.error;
+      res.json({ notes: notes.data || [], refs: refs.data || [], facts: facts.data || [] });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: 'server error' });
+    }
+  });
+  // --- Minimal browse UI (GET /app) ---
+app.get('/app', (_req, res) => {
+    res.set('Content-Type', 'text/html');
+    res.send(`<!doctype html>
+  <html>
+  <head>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Idea Vault — App</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:0}
+    header{position:sticky;top:0;background:#111;color:#fff;padding:12px 16px}
+    .tabs{display:flex;gap:8px;margin-top:8px}
+    .tab{padding:8px 12px;border-radius:999px;background:#333;cursor:pointer}
+    .tab.active{background:#fff;color:#111;font-weight:700}
+    .wrap{max-width:900px;margin:16px auto;padding:0 12px}
+    input{width:100%;padding:10px;border:1px solid #ccc;border-radius:10px}
+    ul{list-style:none;padding:0;margin:12px 0}
+    li{padding:10px;border:1px solid #eee;border-radius:12px;margin:8px 0;cursor:pointer}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#eee;margin-left:6px;font-size:12px}
+    .panel{display:none}
+    .panel.active{display:block}
+    .drawer{border:1px dashed #bbb;border-radius:12px;padding:10px;margin-top:8px}
+    .muted{color:#666}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  </style>
+  </head>
+  <body>
+  <header>
+    <div><b>Idea Vault</b></div>
+    <div class="tabs">
+      <div class="tab active" data-tab="ideas">Ideas</div>
+      <div class="tab" data-tab="people">People</div>
+      <div class="tab" data-tab="tools">Tools</div>
+    </div>
+  </header>
+  
+  <div class="wrap">
+    <input id="key" placeholder="API Key (saved locally)" />
+    <div class="muted" id="msg"></div>
+  
+    <div id="ideas" class="panel active">
+      <h3>Ideas</h3>
+      <ul id="ideaList"></ul>
+      <div id="ideaResearch" class="drawer" style="display:none">
+        <div><b id="iTitle"></b></div>
+        <div class="row">
+          <div>
+            <div><b>Notes</b></div>
+            <ul id="noteList"></ul>
+          </div>
+          <div>
+            <div><b>References</b></div>
+            <ul id="refList"></ul>
+            <div><b>Facts</b></div>
+            <ul id="factList"></ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  
+    <div id="people" class="panel">
+      <h3>People</h3>
+      <ul id="peopleList"></ul>
+    </div>
+  
+    <div id="tools" class="panel">
+      <h3>Tools</h3>
+      <ul id="toolList"></ul>
+    </div>
+  </div>
+  
+  <script>
+  const msg=(t)=>document.getElementById('msg').textContent=t||'';
+  const keyBox=document.getElementById('key');
+  keyBox.value=localStorage.getItem('iv_key')||'';
+  keyBox.onchange=()=>{ localStorage.setItem('iv_key', keyBox.value.trim()); msg('Key saved ✓'); setTimeout(()=>msg(''),1200); };
+  
+  function tabTo(id){
+    document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(p=>p.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+    document.querySelector(\`.tab[data-tab="\${id}"]\`).classList.add('active');
+  }
+  
+  document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>tabTo(t.dataset.tab));
+  
+  async function getJSON(url){
+    const k=(localStorage.getItem('iv_key')||'').trim();
+    if(!k){ msg('Enter API key above.'); throw new Error('no key'); }
+    const r=await fetch(url,{headers:{'x-api-key':k}});
+    if(!r.ok){ const d=await r.json().catch(()=>({})); throw new Error(d.error||'error'); }
+    return r.json();
+  }
+  
+  async function loadIdeas(){
+    const list=document.getElementById('ideaList'); list.innerHTML='Loading...';
+    try{
+      const items=await getJSON('/api/list?type=idea');
+      list.innerHTML='';
+      items.forEach(it=>{
+        const li=document.createElement('li');
+        li.innerHTML=\`<b>\${it.title||'Untitled'}</b> <span class="pill">\${new Date(it.created_at).toLocaleDateString()}</span><div class="muted">\${it.summary||''}</div>\`;
+        li.onclick=()=>openIdea(it);
+        list.appendChild(li);
+      });
+    }catch(e){ list.innerHTML='Error loading.'; }
+  }
+  async function openIdea(it){
+    document.getElementById('iTitle').textContent=it.title||'Untitled';
+    document.getElementById('ideaResearch').style.display='block';
+    const k=(localStorage.getItem('iv_key')||'').trim();
+    const data=await getJSON('/api/idea/'+it.id+'/research');
+    const render=(arr,el,fmt)=>{ el.innerHTML=''; if(arr.length===0){el.innerHTML='<li class="muted">none</li>'; return;} arr.forEach(x=>{const li=document.createElement('li'); li.innerHTML=fmt(x); el.appendChild(li);}); };
+    render(data.notes, document.getElementById('noteList'), x=>x.content);
+    render(data.refs,  document.getElementById('refList'),  x=>\`<a href="\${x.url||'#'}" target="_blank">\${x.title||x.url||'link'}</a>\`);
+    render(data.facts, document.getElementById('factList'), x=>\`\${x.statement} <span class="pill">c:\${x.confidence||'-'}</span>\`);
+  }
+  
+  async function loadPeople(){
+    const list=document.getElementById('peopleList'); list.innerHTML='Loading...';
+    try{
+      const items=await getJSON('/api/list?type=person');
+      list.innerHTML='';
+      items.forEach(p=>{
+        const li=document.createElement('li');
+        li.innerHTML=\`<b>\${p.name}</b> <span class="muted">\${p.company||''} \${p.role?('· '+p.role):''}</span><div class="muted">\${p.phone||''} \${p.email?('· '+p.email):''}</div>\`;
+        list.appendChild(li);
+      });
+    }catch(e){ list.innerHTML='Error loading.'; }
+  }
+  
+  async function loadTools(){
+    const list=document.getElementById('toolList'); list.innerHTML='Loading...';
+    try{
+      const items=await getJSON('/api/list?type=tool');
+      list.innerHTML='';
+      items.forEach(t=>{
+        const li=document.createElement('li');
+        li.innerHTML=\`<b>\${t.name}</b> \${t.url?('<a href="'+t.url+'" target="_blank" class="pill">open</a>'):''}<div class="muted">\${t.category||''} \${t.description?('· '+t.description):''}</div>\`;
+        list.appendChild(li);
+      });
+    }catch(e){ list.innerHTML='Error loading.'; }
+  }
+  
+  // first load
+  loadIdeas(); loadPeople(); loadTools();
+  </script>
+  </body></html>`);
+  });
+
 // Start server (Railway-compatible)
 const port = Number(process.env.PORT) || 8080;
 app.listen(port, '0.0.0.0', () => console.log('listening on', port));
